@@ -1,0 +1,16 @@
+[package]
+name = "nvim_upgrade"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bunt = "0.2.8"
+futures = "0.3.28"
+join = "0.3.1"
+libc = "0.2.142"
+reqwest = { version = "0.11.17", features = ["json"] }
+semver = "1.0.17"
+serde = { version = "1.0.160", features = ["derive"] }
+tokio = { version = "1.28.0", features = ["rt-multi-thread", "fs"] }
