@@ -121,6 +121,7 @@ fn main() -> MyExit {
         !tmp
     }});
 
-    runtime.and_then(|rt| rt.block_on(run(client, version_path, read_only.to_owned())))
+    runtime
+        .and_then(|rt| rt.block_on(run(client, version_path, read_only.to_owned())))
         .map_or_else(Fail, |_| Success)
 }
