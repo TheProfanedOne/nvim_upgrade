@@ -97,7 +97,7 @@ async fn do_upgrade(client: Client, down_url: Url) -> Result<()> {
 }
 
 async fn run(client: Client, version_path: PathBuf, read_file: bool) -> Result<()> {
-    let c_handle = get_current(read_file, version_path);
+    let c_handle = get_current(read_file, version_path.clone());
     let l_handle = get_latest(client.clone());
     let (current, (latest, down_url)) = try_async_spawn!(c_handle, l_handle).await?;
     
@@ -106,7 +106,7 @@ async fn run(client: Client, version_path: PathBuf, read_file: bool) -> Result<(
         std::cmp::Ordering::Greater => {
             bprintln!("{$green}Downloading latest version...{/$} {$dimmed}(v{}){/$}", latest);
             do_upgrade(client, down_url).await?;
-            fs::write(NVIM_VERSION_PATH, latest.to_string()).await
+            fs::write(version_path, latest.to_string()).await
                 .with_context(|| format!("Failed to write new version to '{NVIM_VERSION_PATH}'"))?;
             bprintln!("{$green}Done!{/$}")
         },
