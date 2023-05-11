@@ -1,4 +1,3 @@
-use once_cell::sync::Lazy;
 use serde::Deserialize;
 use reqwest::{self, Client, Url};
 use semver::Version;
@@ -8,7 +7,7 @@ use join::try_async_spawn;
 use MyExit::*;
 use anyhow::{Context, Result, anyhow, Error as AnyError};
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     process::{ExitCode, Termination},
     os::unix::prelude::PermissionsExt
 };
@@ -18,7 +17,7 @@ const NVIM_PATH: &str = "/opt/neovim/nvim.appimage";
 const NVIM_API: &str = "https://api.github.com/repos/neovim/neovim/releases/latest";
 
 enum MyExit {
-    Success,
+    Success(()),
     Fail(AnyError)
 }
 
@@ -43,9 +42,9 @@ struct NvimResponse {
     body: String
 }
 
-async fn get_current(read_file: bool, version_path: PathBuf) -> Result<Version> {
+async fn get_current(read_file: bool) -> Result<Version> {
     if read_file {
-        Version::parse(&fs::read_to_string(version_path).await
+        Version::parse(&fs::read_to_string(NVIM_VERSION_PATH).await
             .with_context(|| format!("Could not access '{NVIM_VERSION_PATH}'"))?)
     } else {
         Version::parse("0.0.0")
@@ -58,19 +57,16 @@ async fn get_latest(client: Client) -> Result<(Version, Url)> {
         .get(NVIM_API).header("User-Agent", "request")
         .send().await.context("Request failed")?
         .json().await.context("JSON conversion failed")?;
-    
     let version = Version::parse(nvim_res.body
         .lines().nth(1).ok_or_else(|| anyhow!("Could not get second line of 'body'"))?
         .split(' ').nth(1).ok_or_else(|| anyhow!("Could not get second segment of second line of 'body'"))?
         .strip_prefix('v').ok_or_else(|| anyhow!("Could not strip 'v' from segment"))?)
         .context("Failed to parse version from 'body'")?;
-    
     let down_url = Url::parse(&nvim_res.assets
         .into_iter().find(|a| a.content_type == "application/vnd.appimage")
         .ok_or_else(|| anyhow!("Could not find correct asset"))?
         .browser_download_url)
         .context("Failed to parse Url from JSON")?;
-    
     Ok((version, down_url))
 }
 
@@ -91,17 +87,16 @@ async fn do_upgrade(client: Client, down_url: Url) -> Result<()> {
     }).await.with_context(|| format!("Failed to set file permissions for '{NVIM_PATH}'"))
 }
 
-async fn run(client: Client, version_path: PathBuf, read_file: bool) -> Result<()> {
-    let c_handle = get_current(read_file, version_path.clone());
+async fn run(client: Client, read_file: bool) -> Result<()> {
+    let c_handle = get_current(read_file);
     let l_handle = get_latest(client.clone());
     let (current, (latest, down_url)) = try_async_spawn!(c_handle, l_handle).await?;
-    
     Ok(match latest.cmp(&current) {
         std::cmp::Ordering::Equal => bprintln!("{$green}{$bold}Neovim{/$} is up to date!{/$} {$dimmed}(v{}){/$}", current),
         std::cmp::Ordering::Greater => {
             bprintln!("{$green}Downloading latest version...{/$} {$dimmed}(v{}){/$}", latest);
             do_upgrade(client, down_url).await?;
-            fs::write(version_path, latest.to_string()).await
+            fs::write(NVIM_VERSION_PATH, latest.to_string()).await
                 .with_context(|| format!("Failed to write new version to '{NVIM_VERSION_PATH}'"))?;
             bprintln!("{$green}Done!{/$}")
         },
@@ -110,18 +105,10 @@ async fn run(client: Client, version_path: PathBuf, read_file: bool) -> Result<(
 }
 
 fn main() -> MyExit {
-    let runtime = Builder::new_multi_thread().enable_all()
-        .build().context("Runtime building failed");
-
-    let client = Client::new();
-    let version_path = PathBuf::from(NVIM_VERSION_PATH);
-    let read_only = Lazy::new({let path = version_path.clone(); move || {
-        let tmp = !Path::new(NVIM_PATH).exists() || !path.exists();
+    let runtime = Builder::new_multi_thread().enable_all().build().context("Runtime building failed");
+    runtime.and_then(|rt| rt.block_on(run(Client::new(), {
+        let tmp = !Path::new(NVIM_PATH).exists() || !Path::new(NVIM_VERSION_PATH).exists();
         if tmp { bprintln!("{$yellow+bold}No (valid) Neovim Installation Found.{/$}"); }
         !tmp
-    }});
-
-    runtime
-        .and_then(|rt| rt.block_on(run(client, version_path, read_only.to_owned())))
-        .map_or_else(Fail, |_| Success)
+    }))).map_or_else(Fail, Success)
 }
