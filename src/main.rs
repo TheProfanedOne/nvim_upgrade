@@ -1,14 +1,15 @@
 use serde::Deserialize;
-use reqwest::{self, Client};
+use reqwest::{self, Client, Url};
 use semver::Version;
-use libc::{chmod as sys_chmod, mode_t};
 use bunt::{println as bprintln, eprintln as ebprintln};
-use tokio::{fs, runtime::Builder};
-use join::{try_async_spawn, try_join_async};
+use tokio::{fs, runtime::Builder, io::AsyncWriteExt};
+use join::try_async_spawn;
 use MyExit::*;
+use anyhow::{Context, Result, anyhow, Error as AnyError};
 use std::{
-    ffi::CString, path::{Path, PathBuf},
-    process::{ExitCode, Termination}
+    path::{Path, PathBuf},
+    process::{ExitCode, Termination},
+    os::unix::prelude::PermissionsExt
 };
 
 const NVIM_VERSION_PATH: &str = "/opt/neovim/current_version";
@@ -17,7 +18,7 @@ const NVIM_API: &str = "https://api.github.com/repos/neovim/neovim/releases/late
 
 enum MyExit {
     Success,
-    Fail(String)
+    Fail(AnyError)
 }
 
 impl Termination for MyExit {
@@ -31,7 +32,7 @@ impl Termination for MyExit {
 
 macro_rules! fail {
     ($($arg:tt)*) => {
-        return MyExit::Fail(format!($($arg)*))
+        return MyExit::Fail(anyhow!($($arg)*))
     };
 }
 
@@ -47,52 +48,55 @@ struct NvimResponse {
     body: String
 }
 
-fn chmod(path: &str, mode: mode_t) -> Result<(), String> {
-    let path = CString::new(path).map_err(|ex| format!("Could not convert path to CString: {ex}"))?;
-    let res = unsafe { sys_chmod(path.as_ptr(), mode) };
-    if res == 0 { Ok(()) } else { Err(format!("chmod failed with error code {res}")) }
-}
-
-async fn get_current(read_file: bool, version_path: PathBuf) -> Result<Version, String> {
+async fn get_current(read_file: bool, version_path: PathBuf) -> Result<Version> {
     if read_file {
-        Version::parse(&try_join_async! {
-            fs::read_to_string(version_path) !> |ex| format!("Could not access '{NVIM_VERSION_PATH}': {ex}")
-        }.await?)
+        Version::parse(&fs::read_to_string(version_path).await
+            .with_context(|| format!("Could not access '{NVIM_VERSION_PATH}'"))?)
     } else {
         Version::parse("0.0.0")
-    }.map_err(|ex| format!("Could not parse current nvim version: {ex}"))
+    }.context("Could not parse current nvim version")
 }
 
-async fn get_latest(client: Client) -> Result<(Version, String), String> {
+async fn get_latest(client: Client) -> Result<(Version, Url)> {
     bprintln!("{$green}Polling {$bold}Neovim{/$} github releases API...{/$}");
     let nvim_res: NvimResponse = client
         .get(NVIM_API).header("User-Agent", "request")
-        .send().await.map_err(|ex| format!("Request failed: {ex}"))?
-        .json().await.map_err(|ex| format!("JSON conversion failed: {ex}"))?;
+        .send().await.context("Request failed")?
+        .json().await.context("JSON conversion failed")?;
     
     let version = Version::parse(nvim_res.body
-        .lines().nth(1).ok_or("Could not get second line of 'body'")?
-        .split(' ').nth(1).ok_or("Could not get second segment of second line of 'body'")?
-        .strip_prefix('v').ok_or("Could not strip 'v' from segment")?)
-        .map_err(|ex| format!("Failed to parse version from 'body': {ex}"))?;
+        .lines().nth(1).ok_or_else(|| anyhow!("Could not get second line of 'body'"))?
+        .split(' ').nth(1).ok_or_else(|| anyhow!("Could not get second segment of second line of 'body'"))?
+        .strip_prefix('v').ok_or_else(|| anyhow!("Could not strip 'v' from segment"))?)
+        .context("Failed to parse version from 'body'")?;
     
-    let down_url = nvim_res.assets
+    let down_url = Url::parse(&nvim_res.assets
         .into_iter().find(|a| a.content_type == "application/vnd.appimage")
-        .ok_or("Could not find correct asset")?
-        .browser_download_url;
+        .ok_or_else(|| anyhow!("Could not find correct asset"))?
+        .browser_download_url)
+        .context("Failed to parse Url from JSON")?;
     
     Ok((version, down_url))
 }
 
-async fn do_upgrade(client: Client, down_url: String) -> Result<(), String> {
-    let res = client.get(down_url).send().await.map_err(|ex| format!("Download GET request failed: {ex}"))?;
-    let bytes = res.bytes().await.map_err(|ex| format!("Could not get bytes from response body: {ex}"))?;
+async fn do_upgrade(client: Client, down_url: Url) -> Result<()> {
+    let bytes = client.get(down_url)
+        .send().await.context("Download GET request failed")?
+        .bytes().await.context("Could not get bytes from response body")?;
     bprintln!("{$green}Installing new version...{/$}");
-    fs::write(NVIM_PATH, bytes).await.map_err(|ex| format!("Failed to write to '{NVIM_PATH}': {ex}"))?;
-    chmod(NVIM_PATH, 0o755).map_err(|ex| format!("Could not call chmod on '{NVIM_PATH}': {ex}"))
+    let mut nvim_file = fs::OpenOptions::new().create(true).write(true).open(NVIM_PATH)
+        .await.with_context(|| format!("Failed to open '{NVIM_PATH}'"))?;
+    nvim_file.write_all(&bytes).await.with_context(|| format!("Failed to write to '{NVIM_PATH}':"))?;
+    nvim_file.set_permissions({
+        let mut perms = nvim_file
+            .metadata().await.with_context(|| format!("Could not get metadata from '{NVIM_PATH}'"))?
+            .permissions();
+        perms.set_mode(0o755);
+        perms
+    }).await.with_context(|| format!("Failed to set file permissions for '{NVIM_PATH}'"))
 }
 
-async fn run(client: Client, version_path: PathBuf, read_file: bool) -> Result<(), String> {
+async fn run(client: Client, version_path: PathBuf, read_file: bool) -> Result<()> {
     let c_handle = get_current(read_file, version_path);
     let l_handle = get_latest(client.clone());
     let (current, (latest, down_url)) = try_async_spawn!(c_handle, l_handle).await?;
@@ -103,10 +107,10 @@ async fn run(client: Client, version_path: PathBuf, read_file: bool) -> Result<(
             bprintln!("{$green}Downloading latest version...{/$} {$dimmed}(v{}){/$}", latest);
             do_upgrade(client, down_url).await?;
             fs::write(NVIM_VERSION_PATH, latest.to_string()).await
-                .map_err(|ex| format!("Failed to write new version to '{NVIM_VERSION_PATH}': {ex}"))?;
+                .with_context(|| format!("Failed to write new version to '{NVIM_VERSION_PATH}'"))?;
             bprintln!("{$green}Done!{/$}")
         },
-        _ => Err("How did you get a newer version than the latest?")?,
+        _ => Err(anyhow!("How did you get a newer version than the latest?"))?,
     })
 }
 
