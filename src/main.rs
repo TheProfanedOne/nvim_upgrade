@@ -116,7 +116,7 @@ async fn run(client: Client, version_path: PathBuf, read_file: bool) -> Result<(
 
 fn main() -> MyExit {
     let runtime = match Builder::new_multi_thread().enable_all().build() {
-        Ok(rt) => rt, Err(ex) => fail!("Runtime building failed: {ex}")
+        Ok(r) => r, Err(ex) => fail!("Runtime building failed: {ex}")
     };
 
     let client = Client::new();
@@ -128,6 +128,6 @@ fn main() -> MyExit {
     };
 
     match runtime.block_on(run(client, version_path, read_file)) {
-        Ok(_) => Success, Err(ex) => Fail(ex)
+        Err(ex) => Fail(ex), _ => Success
     }
 }
