@@ -1,3 +1,4 @@
+use once_cell::sync::Lazy;
 use serde::Deserialize;
 use reqwest::{self, Client, Url};
 use semver::Version;
@@ -28,12 +29,6 @@ impl Termination for MyExit {
             ExitCode::FAILURE
         } else { ExitCode::SUCCESS }
     }
-}
-
-macro_rules! fail {
-    ($($arg:tt)*) => {
-        return MyExit::Fail(anyhow!($($arg)*))
-    };
 }
 
 #[derive(Deserialize)]
@@ -115,19 +110,17 @@ async fn run(client: Client, version_path: PathBuf, read_file: bool) -> Result<(
 }
 
 fn main() -> MyExit {
-    let runtime = match Builder::new_multi_thread().enable_all().build() {
-        Ok(r) => r, Err(ex) => fail!("Runtime building failed: {ex}")
-    };
+    let runtime = Builder::new_multi_thread().enable_all()
+        .build().context("Runtime building failed");
 
     let client = Client::new();
     let version_path = PathBuf::from(NVIM_VERSION_PATH);
-    let read_file = {
-        let tmp = !Path::new(NVIM_PATH).exists() || !version_path.exists();
+    let read_only = Lazy::new({let path = version_path.clone(); move || {
+        let tmp = !Path::new(NVIM_PATH).exists() || !path.exists();
         if tmp { bprintln!("{$yellow+bold}No (valid) Neovim Installation Found.{/$}"); }
         !tmp
-    };
+    }});
 
-    match runtime.block_on(run(client, version_path, read_file)) {
-        Err(ex) => Fail(ex), _ => Success
-    }
+    runtime.and_then(|rt| rt.block_on(run(client, version_path, read_only.to_owned())))
+        .map_or_else(Fail, |_| Success)
 }
