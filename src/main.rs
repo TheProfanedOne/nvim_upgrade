@@ -9,8 +9,7 @@ use anyhow::{Context, Result, Error as AnyError, anyhow, bail};
 use indicatif::{ProgressBar, ProgressStyle};
 use futures_util::StreamExt;
 use std::{
-    cmp::{Ordering::*, min},
-    path::Path,
+    cmp::{Ordering::*, min}, path::Path,
     process::{ExitCode, Termination},
     os::unix::prelude::PermissionsExt
 };
