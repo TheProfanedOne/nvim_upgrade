@@ -127,12 +127,12 @@ async fn run(client: Client, read_file: bool) -> Result<()> {
     })
 }
 
-fn create_builder() -> Result<Runtime> {
+fn create_runtime() -> Result<Runtime> {
     Builder::new_multi_thread().enable_all().build().context("Runtime building failed")
 }
 
 fn main() -> MyExit {
-    create_builder().and_then(|rt| rt.block_on(run(Client::new(), {
+    create_runtime().and_then(|rt| rt.block_on(run(Client::new(), {
         let tmp = !Path::new(NVIM_PATH).exists() || !Path::new(NVIM_VERSION_PATH).exists();
         if tmp { bprintln!("{$yellow+bold}No (valid) Neovim Installation Found.{/$}"); }
         !tmp
