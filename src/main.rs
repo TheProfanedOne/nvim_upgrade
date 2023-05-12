@@ -56,18 +56,18 @@ async fn get_current(read_file: bool) -> Result<Version> {
 
 async fn get_latest(client: Client) -> Result<(Version, Url)> {
     bprintln!("{$green}Polling {$bold}Neovim{/$} github releases API...{/$}");
-    let nvim_res: NvimResponse = client
+    let res: NvimResponse = client
         .get(NVIM_API).header("User-Agent", "request")
         .send().await.context("Request failed")?
         .json().await.context("JSON conversion failed")?;
 
-    let version = Version::parse(nvim_res.body
+    let version = Version::parse(res.body
         .lines().nth(1).ok_or_else(|| anyhow!("Could not get second line of 'body'"))?
         .split(' ').nth(1).ok_or_else(|| anyhow!("Could not get second segment of second line of 'body'"))?
         .strip_prefix('v').ok_or_else(|| anyhow!("Could not strip 'v' from segment"))?)
         .context("Failed to parse version from 'body'")?;
 
-    let down_url = Url::parse(&nvim_res.assets
+    let down_url = Url::parse(&res.assets
         .into_iter().find(|a| a.content_type == "application/vnd.appimage")
         .ok_or_else(|| anyhow!("Could not find correct asset"))?
         .browser_download_url)
@@ -113,7 +113,7 @@ async fn run(client: Client, read_file: bool) -> Result<()> {
     let c_handle = get_current(read_file);
     let l_handle = get_latest(client.clone());
     let (current, (latest, down_url)) = try_async_spawn!(c_handle, l_handle).await?;
-    
+
     Ok(match latest.cmp(&current) {
         Equal => bprintln!("{$green}{$bold}Neovim{/$} is up to date!{/$} {$dimmed}(v{}){/$}", current),
         Greater => {
