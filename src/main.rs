@@ -2,11 +2,14 @@ use serde::Deserialize;
 use reqwest::{self, Client, Url};
 use semver::Version;
 use bunt::{println as bprintln, eprintln as ebprintln};
-use tokio::{fs, runtime::Builder, io::AsyncWriteExt};
+use tokio::{fs, runtime::{Builder, Runtime}, io::AsyncWriteExt};
 use join::try_async_spawn;
 use MyExit::*;
 use anyhow::{Context, Result, anyhow, Error as AnyError};
+use indicatif::{ProgressBar, ProgressStyle};
+use futures_util::StreamExt;
 use std::{
+    cmp::{Ordering::*, min},
     path::Path,
     process::{ExitCode, Termination},
     os::unix::prelude::PermissionsExt
@@ -71,15 +74,26 @@ async fn get_latest(client: Client) -> Result<(Version, Url)> {
 }
 
 async fn do_upgrade(client: Client, down_url: Url) -> Result<()> {
-    let bytes = client.get(down_url)
-        .send().await.context("Download GET request failed")?
-        .bytes().await.context("Could not get bytes from response body")?;
-    bprintln!("{$green}Installing new version...{/$}");
-    let mut nvim_file = fs::OpenOptions::new().create(true).write(true).open(NVIM_PATH)
+    let res = client.get(down_url).send().await.context("Download GET request failed")?;
+    let total_size = res.content_length().ok_or_else(|| anyhow!("Failed to get size of response body."))?;
+    let pb = ProgressBar::new(total_size).with_style(ProgressStyle::default_bar()
+        .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+        .context("Error while downloading `nvim.appimage`")?
+        .progress_chars("=>-"));
+    let mut file = fs::OpenOptions::new().create(true).write(true).open(NVIM_PATH)
         .await.with_context(|| format!("Failed to open '{NVIM_PATH}'"))?;
-    nvim_file.write_all(&bytes).await.with_context(|| format!("Failed to write to '{NVIM_PATH}':"))?;
-    nvim_file.set_permissions({
-        let mut perms = nvim_file
+    let mut downloaded = 0;
+    let mut stream = res.bytes_stream();
+    while let Some(item) = stream.next().await {
+        let chunk = item.context("Error while downloading 'nvim.appimage'")?;
+        file.write_all(&chunk).await.with_context(|| format!("Error while writing to '{NVIM_PATH}'"))?;
+        let new = min(downloaded + (chunk.len() as u64), total_size);
+        downloaded = new;
+        pb.set_position(new);
+    }
+    pb.finish();
+    file.set_permissions({
+        let mut perms = file
             .metadata().await.with_context(|| format!("Could not get metadata from '{NVIM_PATH}'"))?
             .permissions();
         perms.set_mode(0o755);
@@ -92,8 +106,8 @@ async fn run(client: Client, read_file: bool) -> Result<()> {
     let l_handle = get_latest(client.clone());
     let (current, (latest, down_url)) = try_async_spawn!(c_handle, l_handle).await?;
     Ok(match latest.cmp(&current) {
-        std::cmp::Ordering::Equal => bprintln!("{$green}{$bold}Neovim{/$} is up to date!{/$} {$dimmed}(v{}){/$}", current),
-        std::cmp::Ordering::Greater => {
+        Equal => bprintln!("{$green}{$bold}Neovim{/$} is up to date!{/$} {$dimmed}(v{}){/$}", current),
+        Greater => {
             bprintln!("{$green}Downloading latest version...{/$} {$dimmed}(v{}){/$}", latest);
             do_upgrade(client, down_url).await?;
             fs::write(NVIM_VERSION_PATH, latest.to_string()).await
@@ -104,8 +118,12 @@ async fn run(client: Client, read_file: bool) -> Result<()> {
     })
 }
 
+fn create_builder() -> Result<Runtime> {
+    Builder::new_multi_thread().enable_all().build().context("Runtime building failed")
+}
+
 fn main() -> MyExit {
-    Builder::new_multi_thread().enable_all().build().context("Runtime building failed").and_then(|rt| rt.block_on(run(Client::new(), {
+    create_builder().and_then(|rt| rt.block_on(run(Client::new(), {
         let tmp = !Path::new(NVIM_PATH).exists() || !Path::new(NVIM_VERSION_PATH).exists();
         if tmp { bprintln!("{$yellow+bold}No (valid) Neovim Installation Found.{/$}"); }
         !tmp

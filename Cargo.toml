@@ -9,6 +9,8 @@ edition = "2021"
 anyhow = "1.0.71"
 bunt = "0.2.8"
 futures = "0.3.28"
+futures-util = { version = "0.3.28", features = ["tokio-io"] }
+indicatif = { version = "0.17.3", features = ["improved_unicode", "tokio"] }
 join = "0.3.1"
 reqwest = { version = "0.11.17", features = ["json", "stream"] }
 semver = "1.0.17"
