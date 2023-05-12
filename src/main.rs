@@ -1,10 +1,10 @@
+use MyExit::*;
 use serde::Deserialize;
 use reqwest::{self, Client, Url};
 use semver::Version;
 use bunt::{println as bprintln, eprintln as ebprintln};
-use tokio::{fs, runtime::{Builder, Runtime}, io::AsyncWriteExt};
+use tokio::{fs, runtime::Builder, io::AsyncWriteExt};
 use join::try_async_spawn;
-use MyExit::*;
 use anyhow::{Context, Result, Error as AnyError, anyhow, bail};
 use indicatif::{ProgressBar, ProgressStyle};
 use futures_util::StreamExt;
@@ -15,8 +15,8 @@ use std::{
     os::unix::prelude::PermissionsExt
 };
 
-const NVIM_VERSION_PATH: &str = "/opt/neovim/current_version";
-const NVIM_PATH: &str = "/opt/neovim/nvim.appimage";
+const VERSION: &str = "/opt/neovim/current_version";
+const APP_PATH: &str = "/opt/neovim/nvim.appimage";
 const NVIM_API: &str = "https://api.github.com/repos/neovim/neovim/releases/latest";
 
 enum MyExit {
@@ -47,8 +47,8 @@ struct NvimResponse {
 
 async fn get_current(read_file: bool) -> Result<Version> {
     if read_file {
-        Version::parse(&fs::read_to_string(NVIM_VERSION_PATH).await
-            .with_context(|| format!("Could not access '{NVIM_VERSION_PATH}'"))?)
+        Version::parse(&fs::read_to_string(VERSION).await
+            .with_context(|| format!("Could not access '{VERSION}'"))?)
     } else {
         Version::parse("0.0.0")
     }.context("Could not parse current nvim version")
@@ -81,18 +81,18 @@ async fn do_upgrade(client: Client, down_url: Url) -> Result<()> {
     let total_size = res.content_length().ok_or_else(|| anyhow!("Failed to get size of response body."))?;
 
     let pb = ProgressBar::new(total_size).with_style(ProgressStyle::default_bar()
-        .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+        .template("{spinner:.green} [{elapsed_precise}] [{bar:50.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
         .context("Error while downloading `nvim.appimage`")?
-        .progress_chars("=>-"));
+        .progress_chars("#>-"));
 
-    let mut file = fs::OpenOptions::new().create(true).write(true).open(NVIM_PATH)
-        .await.with_context(|| format!("Failed to open '{NVIM_PATH}'"))?;
+    let mut file = fs::OpenOptions::new().create(true).write(true).open(APP_PATH)
+        .await.with_context(|| format!("Failed to open '{APP_PATH}'"))?;
     let mut downloaded = 0;
     let mut stream = res.bytes_stream();
 
     while let Some(item) = stream.next().await {
         let chunk = item.context("Error while downloading 'nvim.appimage'")?;
-        file.write_all(&chunk).await.with_context(|| format!("Error while writing to '{NVIM_PATH}'"))?;
+        file.write_all(&chunk).await.with_context(|| format!("Error while writing to '{APP_PATH}'"))?;
         let new = min(downloaded + (chunk.len() as u64), total_size);
         downloaded = new;
         pb.set_position(new);
@@ -102,11 +102,11 @@ async fn do_upgrade(client: Client, down_url: Url) -> Result<()> {
 
     file.set_permissions({
         let mut perms = file
-            .metadata().await.with_context(|| format!("Could not get metadata from '{NVIM_PATH}'"))?
+            .metadata().await.with_context(|| format!("Could not get metadata from '{APP_PATH}'"))?
             .permissions();
         perms.set_mode(0o755);
         perms
-    }).await.with_context(|| format!("Failed to set file permissions for '{NVIM_PATH}'"))
+    }).await.with_context(|| format!("Failed to set file permissions for '{APP_PATH}'"))
 }
 
 async fn run(client: Client, read_file: bool) -> Result<()> {
@@ -119,22 +119,23 @@ async fn run(client: Client, read_file: bool) -> Result<()> {
         Greater => {
             bprintln!("{$green}Downloading latest version...{/$} {$dimmed}(v{}){/$}", latest);
             do_upgrade(client, down_url).await?;
-            fs::write(NVIM_VERSION_PATH, latest.to_string()).await
-                .with_context(|| format!("Failed to write new version to '{NVIM_VERSION_PATH}'"))?;
+            fs::write(VERSION, latest.to_string()).await
+                .with_context(|| format!("Failed to write new version to '{VERSION}'"))?;
             bprintln!("{$green}Done!{/$}")
         },
         _ => bail!("How did you get a newer version than the latest?")
     })
 }
 
-fn create_runtime() -> Result<Runtime> {
-    Builder::new_multi_thread().enable_all().build().context("Runtime building failed")
-}
-
 fn main() -> MyExit {
-    create_runtime().and_then(|rt| rt.block_on(run(Client::new(), {
-        let tmp = !Path::new(NVIM_PATH).exists() || !Path::new(NVIM_VERSION_PATH).exists();
-        if tmp { bprintln!("{$yellow+bold}No (valid) Neovim Installation Found.{/$}"); }
-        !tmp
+    let create_runtime = || Builder::new_multi_thread().enable_all().build().context("Runtime building failed");
+    let check_files = || [APP_PATH, VERSION].map(|p| Path::new(p).try_exists().with_context(|| format!("Failed to access '{p}'")));
+    create_runtime().and_then(|rt| rt.block_on(run(Client::new(), match check_files() {
+        [Err(e), _] | [_, Err(e)] => return Err(e),
+        [Ok(true), Ok(true)] => true,
+        _ => {
+            bprintln!("{$yellow+bold}No (valid) Neovim Installation Found.{/$}");
+            false
+        }
     }))).map_or_else(Fail, Success)
 }
