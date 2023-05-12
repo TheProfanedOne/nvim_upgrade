@@ -60,30 +60,36 @@ async fn get_latest(client: Client) -> Result<(Version, Url)> {
         .get(NVIM_API).header("User-Agent", "request")
         .send().await.context("Request failed")?
         .json().await.context("JSON conversion failed")?;
+
     let version = Version::parse(nvim_res.body
         .lines().nth(1).ok_or_else(|| anyhow!("Could not get second line of 'body'"))?
         .split(' ').nth(1).ok_or_else(|| anyhow!("Could not get second segment of second line of 'body'"))?
         .strip_prefix('v').ok_or_else(|| anyhow!("Could not strip 'v' from segment"))?)
         .context("Failed to parse version from 'body'")?;
+
     let down_url = Url::parse(&nvim_res.assets
         .into_iter().find(|a| a.content_type == "application/vnd.appimage")
         .ok_or_else(|| anyhow!("Could not find correct asset"))?
         .browser_download_url)
         .context("Failed to parse Url from JSON")?;
+
     Ok((version, down_url))
 }
 
 async fn do_upgrade(client: Client, down_url: Url) -> Result<()> {
     let res = client.get(down_url).send().await.context("Download GET request failed")?;
     let total_size = res.content_length().ok_or_else(|| anyhow!("Failed to get size of response body."))?;
+
     let pb = ProgressBar::new(total_size).with_style(ProgressStyle::default_bar()
         .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
         .context("Error while downloading `nvim.appimage`")?
         .progress_chars("=>-"));
+
     let mut file = fs::OpenOptions::new().create(true).write(true).open(NVIM_PATH)
         .await.with_context(|| format!("Failed to open '{NVIM_PATH}'"))?;
     let mut downloaded = 0;
     let mut stream = res.bytes_stream();
+
     while let Some(item) = stream.next().await {
         let chunk = item.context("Error while downloading 'nvim.appimage'")?;
         file.write_all(&chunk).await.with_context(|| format!("Error while writing to '{NVIM_PATH}'"))?;
@@ -91,7 +97,9 @@ async fn do_upgrade(client: Client, down_url: Url) -> Result<()> {
         downloaded = new;
         pb.set_position(new);
     }
+
     pb.finish();
+
     file.set_permissions({
         let mut perms = file
             .metadata().await.with_context(|| format!("Could not get metadata from '{NVIM_PATH}'"))?
@@ -105,6 +113,7 @@ async fn run(client: Client, read_file: bool) -> Result<()> {
     let c_handle = get_current(read_file);
     let l_handle = get_latest(client.clone());
     let (current, (latest, down_url)) = try_async_spawn!(c_handle, l_handle).await?;
+    
     Ok(match latest.cmp(&current) {
         Equal => bprintln!("{$green}{$bold}Neovim{/$} is up to date!{/$} {$dimmed}(v{}){/$}", current),
         Greater => {
