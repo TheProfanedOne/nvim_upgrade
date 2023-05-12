@@ -5,7 +5,7 @@ use bunt::{println as bprintln, eprintln as ebprintln};
 use tokio::{fs, runtime::{Builder, Runtime}, io::AsyncWriteExt};
 use join::try_async_spawn;
 use MyExit::*;
-use anyhow::{Context, Result, anyhow, Error as AnyError};
+use anyhow::{Context, Result, Error as AnyError, anyhow, bail};
 use indicatif::{ProgressBar, ProgressStyle};
 use futures_util::StreamExt;
 use std::{
@@ -123,7 +123,7 @@ async fn run(client: Client, read_file: bool) -> Result<()> {
                 .with_context(|| format!("Failed to write new version to '{NVIM_VERSION_PATH}'"))?;
             bprintln!("{$green}Done!{/$}")
         },
-        _ => Err(anyhow!("How did you get a newer version than the latest?"))?,
+        _ => bail!("How did you get a newer version than the latest?")
     })
 }
 
