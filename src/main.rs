@@ -3,11 +3,13 @@ use serde::Deserialize;
 use reqwest::{self, Client, Url};
 use semver::Version;
 use bunt::{println as bprintln, eprintln as ebprintln};
-use tokio::{fs, runtime::Builder, io::AsyncWriteExt};
-use join::try_async_spawn;
-use anyhow::{Context, Result, Error as AnyError, anyhow, bail};
+use tokio::{fs, runtime::{Builder, Runtime}, io::AsyncWriteExt};
+use join::{try_async_spawn, try_spawn, try_join, join};
+use partial_application::partial;
+use anyhow::{Context, Result, Error as AnyError, anyhow};
 use indicatif::{ProgressBar, ProgressStyle};
 use futures_util::StreamExt;
+use once_cell::sync::OnceCell;
 use std::{
     cmp::{Ordering::*, min}, path::Path,
     process::{ExitCode, Termination},
@@ -17,6 +19,11 @@ use std::{
 const VERSION: &str = "/opt/neovim/current_version";
 const APP_PATH: &str = "/opt/neovim/nvim.appimage";
 const NVIM_API: &str = "https://api.github.com/repos/neovim/neovim/releases/latest";
+static CLIENT: OnceCell<Client> = OnceCell::new();
+
+fn get_client() -> Result<&'static Client> {
+    CLIENT.get().ok_or_else(|| anyhow!("Failed to access CLIENT."))
+}
 
 enum MyExit {
     Success(()),
@@ -25,8 +32,8 @@ enum MyExit {
 
 impl Termination for MyExit {
     fn report(self) -> ExitCode {
-        if let Self::Fail(msg) = self {
-            ebprintln!("{[red+bold]}", msg);
+        if let Self::Fail(e) = self {
+            ebprintln!("{[red+bold]:?}", e);
             ExitCode::FAILURE
         } else { ExitCode::SUCCESS }
     }
@@ -44,39 +51,42 @@ struct NvimResponse {
     body: String
 }
 
+macro_rules! gen_ctx { ($path:expr) => {
+    format!("Failed to access '{}'", $path)
+}}
+
 async fn get_current(read_file: bool) -> Result<Version> {
     if read_file {
-        Version::parse(&fs::read_to_string(VERSION).await
-            .with_context(|| format!("Could not access '{VERSION}'"))?)
+        fs::read_to_string(VERSION).await.with_context(|| gen_ctx!(VERSION))?.as_str().parse()
     } else {
-        Version::parse("0.0.0")
-    }.context("Could not parse current nvim version")
+        "0.0.0".parse()
+    }.context("Failed to parse current nvim version")
 }
 
-async fn get_latest(client: Client) -> Result<(Version, Url)> {
-    bprintln!("{$green}Polling {$bold}Neovim{/$} github releases API...{/$}");
-    let res: NvimResponse = client
+async fn get_latest() -> Result<(Version, Url)> {
+    bprintln!("{$green}Polling {$bold}Neovim{/$} GitHub releases API...{/$}");
+    let res: NvimResponse = get_client()?
         .get(NVIM_API).header("User-Agent", "request")
-        .send().await.context("Request failed")?
-        .json().await.context("JSON conversion failed")?;
+        .send().await.context("JSON Request Failed")?
+        .json().await.context("JSON Conversion Failed")?;
 
-    let version = Version::parse(res.body
+    let version = res.body
         .lines().nth(1).ok_or_else(|| anyhow!("Could not get second line of 'body'"))?
         .split(' ').nth(1).ok_or_else(|| anyhow!("Could not get second segment of second line of 'body'"))?
-        .strip_prefix('v').ok_or_else(|| anyhow!("Could not strip 'v' from segment"))?)
-        .context("Failed to parse version from 'body'")?;
+        .strip_prefix('v').ok_or_else(|| anyhow!("Could not strip 'v' from segment"))?
+        .parse().context("Failed to parse version from 'body'")?;
 
-    let down_url = Url::parse(&res.assets
+    let down_url = res.assets
         .into_iter().find(|a| a.content_type == "application/vnd.appimage")
         .ok_or_else(|| anyhow!("Could not find correct asset"))?
-        .browser_download_url)
+        .browser_download_url.as_str().parse()
         .context("Failed to parse Url from JSON")?;
 
     Ok((version, down_url))
 }
 
-async fn do_upgrade(client: Client, down_url: Url) -> Result<()> {
-    let res = client.get(down_url).send().await.context("Download GET request failed")?;
+async fn do_upgrade(down_url: Url) -> Result<()> {
+    let res = get_client()?.get(down_url).send().await.context("Download GET request failed")?;
     let total_size = res.content_length().ok_or_else(|| anyhow!("Failed to get size of response body."))?;
 
     let pb = ProgressBar::new(total_size).with_style(ProgressStyle::default_bar()
@@ -85,7 +95,7 @@ async fn do_upgrade(client: Client, down_url: Url) -> Result<()> {
         .progress_chars("#>-"));
 
     let mut file = fs::OpenOptions::new().create(true).write(true).open(APP_PATH)
-        .await.with_context(|| format!("Failed to open '{APP_PATH}'"))?;
+        .await.with_context(|| gen_ctx!(APP_PATH))?;
     let mut downloaded = 0;
     let mut stream = res.bytes_stream();
 
@@ -108,33 +118,52 @@ async fn do_upgrade(client: Client, down_url: Url) -> Result<()> {
     }).await.with_context(|| format!("Failed to set file permissions for '{APP_PATH}'"))
 }
 
-async fn run(client: Client, read_file: bool) -> Result<()> {
-    let c_handle = get_current(read_file);
-    let l_handle = get_latest(client.clone());
-    let (current, (latest, down_url)) = try_async_spawn!(c_handle, l_handle).await?;
+async fn run(read_file: bool) -> Result<()> {
+    let (current, (latest, down_url)) = try_async_spawn!(read_file -> get_current, get_latest()).await?;
 
-    Ok(match latest.cmp(&current) {
-        Equal => bprintln!("{$green}{$bold}Neovim{/$} is up to date!{/$} {$dimmed}(v{}){/$}", current),
+    match latest.cmp(&current) {
+        Equal => Ok(bprintln!("{$green}{$bold}Neovim{/$} is up to date!{/$} {$dimmed}(v{}){/$}", current)),
         Greater => {
             bprintln!("{$green}Downloading latest version...{/$} {$dimmed}(v{}){/$}", latest);
-            do_upgrade(client, down_url).await?;
+            do_upgrade(down_url).await?;
             fs::write(VERSION, latest.to_string()).await
                 .with_context(|| format!("Failed to write new version to '{VERSION}'"))?;
-            bprintln!("{$green}Done!{/$}")
+            Ok(bprintln!("{$green}Done!{/$}"))
         },
-        _ => bail!("How did you get a newer version than the latest?")
+        _ => Err(anyhow!("How did you get a newer version than the latest?"))
+    }
+}
+
+fn check_files() -> Result<bool> {
+    let [res1, res2] = [APP_PATH, VERSION].map(|p| Path::new(p)
+        .try_exists()
+        .with_context(|| format!("Failed to access '{p}'")));
+
+    try_spawn!(res1, res2).map(|t| if t.0 && t.1 { true } else {
+        bprintln!("{$yellow+bold}No (valid) Neovim Installation Found.{/$}");
+        false
     })
 }
 
+fn async_handle(rt: Runtime) -> Result<()> {
+    try_join! {
+        Client::builder()
+        >. build()
+        >. context("Failed to build client")
+        => >>> -> partial!(OnceCell::set => &CLIENT, _)
+        !> |_| anyhow!("Failed to initialize CLIENT")
+    }?;
+    
+    rt.block_on(run(check_files()?))
+}
+
 fn main() -> MyExit {
-    let create_runtime = || Builder::new_multi_thread().enable_all().build().context("Runtime building failed");
-    let check_files = || [APP_PATH, VERSION].map(|p| Path::new(p).try_exists().with_context(|| format!("Failed to access '{p}'")));
-    create_runtime().and_then(|rt| rt.block_on(run(Client::new(), match check_files() {
-        [Err(e), _] | [_, Err(e)] => return Err(e),
-        [Ok(true), Ok(true)] => true,
-        _ => {
-            bprintln!("{$yellow+bold}No (valid) Neovim Installation Found.{/$}");
-            false
-        }
-    }))).map_or_else(Fail, Success)
+    join! {
+        Builder::new_multi_thread()
+        >. enable_all()
+        >. build()
+        >. context("Failed to build runtime")
+        => async_handle
+        >. map_or_else(Fail, Success)
+    }
 }
