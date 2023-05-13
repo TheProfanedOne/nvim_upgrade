@@ -134,17 +134,6 @@ async fn run(read_file: bool) -> Result<()> {
     }
 }
 
-fn check_files() -> Result<bool> {
-    let [res1, res2] = [APP_PATH, VERSION].map(|p| Path::new(p)
-        .try_exists()
-        .with_context(|| format!("Failed to access '{p}'")));
-
-    try_spawn!(res1, res2).map(|t| if t.0 && t.1 { true } else {
-        bprintln!("{$yellow+bold}No (valid) Neovim Installation Found.{/$}");
-        false
-    })
-}
-
 fn async_handle(rt: Runtime) -> Result<()> {
     try_join! {
         Client::builder()
@@ -154,7 +143,16 @@ fn async_handle(rt: Runtime) -> Result<()> {
         !> |_| anyhow!("Failed to initialize CLIENT")
     }?;
     
-    rt.block_on(run(check_files()?))
+    rt.block_on(run({
+        let [res1, res2] = [APP_PATH, VERSION].map(|p| Path::new(p)
+            .try_exists()
+            .with_context(|| format!("Failed to access '{p}'")));
+    
+        try_spawn!(res1, res2).map(|t| if t.0 && t.1 { true } else {
+            bprintln!("{$yellow+bold}No (valid) Neovim Installation Found.{/$}");
+            false
+        })?
+    }))
 }
 
 fn main() -> MyExit {
