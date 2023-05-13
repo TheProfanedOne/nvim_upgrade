@@ -1,6 +1,6 @@
 use MyExit::*;
 use serde::Deserialize;
-use reqwest::{self, Client, Url};
+use reqwest::{Client, Url};
 use semver::Version;
 use bunt::{println as bprintln, eprintln as ebprintln};
 use tokio::{fs, runtime::{Builder, Runtime}, io::AsyncWriteExt};
